@@ -1,0 +1,1 @@
+export { default } from './hart_analytics_app.jsx';
