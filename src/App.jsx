@@ -125,6 +125,12 @@ function buildClient(token) {
           method: "POST",
           headers: { "apikey": SUPA_KEY, "Authorization": `Bearer ${token}` },
         }).catch(() => {}),
+      updatePassword: (newPassword) =>
+        fetch(`${SUPA_URL}/auth/v1/user`, {
+          method: "PUT",
+          headers: { "apikey": SUPA_KEY, "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ password: newPassword }),
+        }).then((r) => r.json()),
     },
     from: (table) => ({
       select: (cols = "*", qs = "") => req(`/rest/v1/${table}?select=${cols}${qs}`),
@@ -645,11 +651,73 @@ function Dashboard({ session, onLogout }) {
   );
 }
 
+// ── Tela de definição de senha (convite / recovery) ───────────────────────────
+function SetPasswordScreen({ token, onDone }) {
+  const [pass, setPass] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [ok, setOk] = useState(false);
+
+  const save = async () => {
+    if (pass.length < 8) { setErr("A senha precisa ter pelo menos 8 caracteres."); return; }
+    if (pass !== confirm) { setErr("As senhas não coincidem."); return; }
+    setLoading(true); setErr("");
+    try {
+      const client = buildClient(token);
+      const data = await client.auth.updatePassword(pass);
+      if (data.error) { setErr(data.error.message || "Erro ao salvar senha."); setLoading(false); return; }
+      setOk(true);
+      setTimeout(() => onDone(token), 1500);
+    } catch (e) { setErr(e.message); setLoading(false); }
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg,#EFF6FF,#F8FAFC)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "system-ui,sans-serif", padding: 24 }}>
+      <div style={{ background: "#fff", borderRadius: 20, padding: 40, maxWidth: 380, width: "100%", boxShadow: "0 8px 40px rgba(0,119,181,0.12)" }}>
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <div style={{ width: 52, height: 52, background: "#0077B5", borderRadius: 14, display: "inline-flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
+            <span style={{ color: "#fff", fontWeight: 800, fontSize: 22 }}>H</span>
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: "#0F172A", marginBottom: 4 }}>Criar sua senha</div>
+          <div style={{ fontSize: 13, color: "#94A3B8" }}>Defina uma senha para acessar o Hart Analytics</div>
+        </div>
+        {ok ? (
+          <div style={{ textAlign: "center", padding: "20px 0" }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>✅</div>
+            <div style={{ fontWeight: 600, color: "#16A34A" }}>Senha criada! Entrando...</div>
+          </div>
+        ) : (
+          <>
+            <div onKeyDown={(e) => { if (e.key === "Enter" && pass && confirm) save(); }}>
+              <Input label="Nova senha" type="password" value={pass} onChange={setPass} placeholder="mínimo 8 caracteres" autoFocus />
+              <Input label="Confirmar senha" type="password" value={confirm} onChange={setConfirm} placeholder="repita a senha" />
+            </div>
+            {err && <div style={{ background: "#FEF2F2", color: "#DC2626", borderRadius: 8, padding: "10px 14px", fontSize: 12, marginBottom: 12 }}>{err}</div>}
+            <Btn full onClick={save} disabled={!pass || !confirm || loading}>{loading ? "Salvando..." : "Definir senha e entrar →"}</Btn>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Parse hash from Supabase auth redirect ────────────────────────────────────
+function parseHash() {
+  const hash = window.location.hash.slice(1);
+  if (!hash) return null;
+  const params = Object.fromEntries(new URLSearchParams(hash));
+  return params.access_token ? params : null;
+}
+
 // ── App root ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [session, setSession] = useState(() => {
     try { return JSON.parse(localStorage.getItem("hart_session") || "null"); } catch { return null; }
   });
+
+  const hashParams = parseHash();
+  const isAuthCallback = hashParams && ["recovery", "invite", "signup"].includes(hashParams.type);
 
   const handleLogin = (sess) => {
     localStorage.setItem("hart_session", JSON.stringify(sess));
@@ -662,6 +730,12 @@ export default function App() {
     setSession(null);
   };
 
+  const handlePasswordSet = (token) => {
+    window.location.hash = "";
+    handleLogin({ access_token: token });
+  };
+
+  if (isAuthCallback) return <SetPasswordScreen token={hashParams.access_token} onDone={handlePasswordSet} />;
   if (!session?.access_token) return <LoginScreen onLogin={handleLogin} />;
   return <Dashboard session={session} onLogout={handleLogout} />;
 }
