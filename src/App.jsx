@@ -38,6 +38,29 @@ const chunk = (arr, n) => {
   return out;
 };
 
+// ── Week helpers ──────────────────────────────────────────────────────────────
+function getIsoWeek(iso) {
+  const d = new Date(iso + "T00:00:00");
+  const day = d.getDay() || 7;
+  d.setDate(d.getDate() + 4 - day);
+  const yearStart = new Date(d.getFullYear(), 0, 1);
+  const week = Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
+  return `${d.getFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+function weekLabel(wk) {
+  // wk = "2025-W03" → "03/Jan"
+  const [year, w] = wk.split("-W");
+  const simple = new Date(+year, 0, 1 + (+w - 1) * 7);
+  const mon = simple.getDate() - ((simple.getDay() + 6) % 7);
+  const monDate = new Date(simple.getFullYear(), simple.getMonth(), mon);
+  const PT = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+  return `${String(monDate.getDate()).padStart(2,"0")}/${PT[monDate.getMonth()]}`;
+}
+function pctChange(curr, prev) {
+  if (!prev) return null;
+  return (((curr - prev) / prev) * 100).toFixed(1);
+}
+
 // ── XLSX parsers ─────────────────────────────────────────────────────────────
 function parseDiscovery(ws) {
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
@@ -469,6 +492,78 @@ function Dashboard({ session, onLogout }) {
     return Array.from(months).sort().map((mo) => { const r = { month: fmtMonth(mo) }; profiles.forEach((p) => { r[p.name] = byP[p.id]?.[mo] || 0; }); return r; });
   }, [dbData.fol, profiles]);
 
+  // ── Weekly aggregations ────────────────────────────────────────────────────
+  const weeklyData = useMemo(() => {
+    // Build week buckets for impressions, engagements, new followers — per profile + composite
+    const weeks = new Set();
+    const byP = {};
+
+    profiles.forEach((p) => { byP[p.id] = {}; });
+
+    dbData.eng.forEach((d) => {
+      if (!d.date) return;
+      const wk = getIsoWeek(d.date);
+      weeks.add(wk);
+      if (!byP[d.profile_id]) return;
+      if (!byP[d.profile_id][wk]) byP[d.profile_id][wk] = { imp: 0, eng: 0, fol: 0 };
+      byP[d.profile_id][wk].imp += d.impressions || 0;
+      byP[d.profile_id][wk].eng += d.engagements || 0;
+    });
+
+    dbData.fol.forEach((d) => {
+      if (!d.date) return;
+      const wk = getIsoWeek(d.date);
+      weeks.add(wk);
+      if (!byP[d.profile_id]) return;
+      if (!byP[d.profile_id][wk]) byP[d.profile_id][wk] = { imp: 0, eng: 0, fol: 0 };
+      byP[d.profile_id][wk].fol += d.new_followers || 0;
+    });
+
+    const sortedWeeks = Array.from(weeks).sort();
+
+    const rows = sortedWeeks.map((wk) => {
+      const row = { week: wk, label: weekLabel(wk), composite_imp: 0, composite_eng: 0, composite_fol: 0 };
+      profiles.forEach((p) => {
+        const v = byP[p.id]?.[wk] || { imp: 0, eng: 0, fol: 0 };
+        row[p.name + "_imp"] = v.imp;
+        row[p.name + "_eng"] = v.eng;
+        row[p.name + "_fol"] = v.fol;
+        row.composite_imp += v.imp;
+        row.composite_eng += v.eng;
+        row.composite_fol += v.fol;
+      });
+      return row;
+    });
+
+    // WoW deltas — last 12 weeks
+    const last12 = rows.slice(-12);
+    const tableRows = last12.map((row, i) => {
+      const prev = last12[i - 1];
+      const woW = {};
+      profiles.forEach((p) => {
+        woW[p.name] = {
+          imp: row[p.name + "_imp"] || 0,
+          eng: row[p.name + "_eng"] || 0,
+          fol: row[p.name + "_fol"] || 0,
+          imp_chg: prev ? pctChange(row[p.name + "_imp"], prev[p.name + "_imp"]) : null,
+          eng_chg: prev ? pctChange(row[p.name + "_eng"], prev[p.name + "_eng"]) : null,
+        };
+      });
+      woW["__composite"] = {
+        imp: row.composite_imp,
+        eng: row.composite_eng,
+        fol: row.composite_fol,
+        imp_chg: prev ? pctChange(row.composite_imp, prev.composite_imp) : null,
+        eng_chg: prev ? pctChange(row.composite_eng, prev.composite_eng) : null,
+      };
+      return { week: row.week, label: row.label, woW };
+    });
+
+    return { chartRows: rows.slice(-20), tableRows };
+  }, [dbData.eng, dbData.fol, profiles]);
+
+  const [weeklyMetric, setWeeklyMetric] = useState("imp");
+
   const topByEng = useMemo(() =>
     dbData.posts.filter((p) => selIds.has(p.profile_id)).sort((a, b) => b.engagements - a.engagements).slice(0, 10)
       .map((p) => ({ ...p, profileName: profiles.find((x) => x.id === p.profile_id)?.name || "?", color: COLORS[profiles.findIndex((x) => x.id === p.profile_id) % COLORS.length] })),
@@ -523,7 +618,7 @@ function Dashboard({ session, onLogout }) {
             <span style={{ fontWeight: 700, fontSize: 13, color: "#0F172A", whiteSpace: "nowrap" }}>Hart Analytics</span>
           </div>
 
-          {[["overview", "Visão Geral"], ["posts", "Top Posts"], ["audience", "Audiência"]].map(([k, l]) => (
+          {[["overview", "Visão Geral"], ["semanal", "Semanal"], ["posts", "Top Posts"], ["audience", "Audiência"]].map(([k, l]) => (
             <button key={k} onClick={() => setTab(k)} style={{ padding: "0 14px", height: "100%", border: "none", borderBottom: tab === k ? "2px solid #0077B5" : "2px solid transparent", background: "none", cursor: "pointer", fontSize: 13, fontWeight: tab === k ? 600 : 400, color: tab === k ? "#0077B5" : "#64748B", transition: "all 0.15s", flexShrink: 0 }}>{l}</button>
           ))}
 
@@ -669,6 +764,100 @@ function Dashboard({ session, onLogout }) {
             </div>
           )
         )}
+
+        {/* ── SEMANAL ── */}
+        {tab === "semanal" && (() => {
+          const { chartRows, tableRows } = weeklyData;
+          const metricKey = (name) => name + "_" + weeklyMetric;
+          const metricLabel = weeklyMetric === "imp" ? "Impressões" : weeklyMetric === "eng" ? "Engajamentos" : "Novos Seguidores";
+          const compositeKey = "composite_" + weeklyMetric;
+
+          return (
+            <>
+              {/* Metric switcher */}
+              <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+                {[["imp","Impressões"],["eng","Engajamentos"],["fol","Seguidores"]].map(([k,l]) => (
+                  <button key={k} onClick={() => setWeeklyMetric(k)} style={{ padding: "6px 16px", borderRadius: 20, border: `1px solid ${weeklyMetric===k?"#0077B5":"#E2E8F0"}`, background: weeklyMetric===k?"#0077B5":"#fff", color: weeklyMetric===k?"#fff":"#64748B", fontSize: 13, fontWeight: weeklyMetric===k?600:400, cursor: "pointer" }}>{l}</button>
+                ))}
+                <div style={{ marginLeft: "auto", fontSize: 12, color: "#94A3B8", alignSelf: "center" }}>Últimas 20 semanas • WoW = variação semana anterior</div>
+              </div>
+
+              {/* Chart — individual + composite */}
+              <div style={{ ...card, padding: 22, marginBottom: 16 }}>
+                <div style={{ fontWeight: 600, color: "#0F172A", marginBottom: 4, fontSize: 14 }}>{metricLabel} por Semana — Comparativo</div>
+                <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 16 }}>Linha tracejada = total composto de todos os perfis</div>
+                <ResponsiveContainer width="100%" height={260}>
+                  <LineChart data={chartRows} margin={{ right: 12, left: -8 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#F8FAFC" />
+                    <XAxis dataKey="label" tick={{ fontSize: 10, fill: "#94A3B8" }} interval="preserveStartEnd" />
+                    <YAxis tick={{ fontSize: 10, fill: "#94A3B8" }} tickFormatter={fmtNum} />
+                    <Tooltip formatter={(v, n) => [fmtNum(v), n]} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {profiles.map((p, i) => (
+                      <Line key={p.id} type="monotone" dataKey={metricKey(p.name)} name={p.name} stroke={COLORS[i % COLORS.length]} strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                    ))}
+                    <Line type="monotone" dataKey={compositeKey} name="Composto" stroke="#0F172A" strokeWidth={2.5} strokeDasharray="5 3" dot={false} activeDot={{ r: 4 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* WoW table */}
+              <div style={{ ...card, padding: 20, overflowX: "auto" }}>
+                <div style={{ fontWeight: 600, color: "#0F172A", marginBottom: 4, fontSize: 14 }}>Semana a Semana — Últimas 12 Semanas</div>
+                <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 16 }}>Variação % em relação à semana anterior. Verde = crescimento, vermelho = queda.</div>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 500 }}>
+                  <thead>
+                    <tr style={{ borderBottom: "2px solid #F1F5F9" }}>
+                      <th style={{ padding: "8px 10px", textAlign: "left", color: "#94A3B8", fontWeight: 500, fontSize: 11, textTransform: "uppercase", whiteSpace: "nowrap" }}>Semana</th>
+                      {profiles.map((p, i) => (
+                        <th key={p.id} colSpan={2} style={{ padding: "8px 10px", textAlign: "center", color: COLORS[i % COLORS.length], fontWeight: 600, fontSize: 11, textTransform: "uppercase", whiteSpace: "nowrap", borderLeft: "1px solid #F1F5F9" }}>{p.name}</th>
+                      ))}
+                      <th colSpan={2} style={{ padding: "8px 10px", textAlign: "center", color: "#0F172A", fontWeight: 600, fontSize: 11, textTransform: "uppercase", whiteSpace: "nowrap", borderLeft: "1px solid #F1F5F9" }}>Composto</th>
+                    </tr>
+                    <tr style={{ borderBottom: "1px solid #F1F5F9" }}>
+                      <th style={{ padding: "4px 10px" }} />
+                      {[...profiles.map(() => null), null].map((_, gi) => (
+                        <>{[metricLabel, "WoW"].map((h, hi) => (
+                          <th key={gi+"-"+hi} style={{ padding: "4px 10px", textAlign: "right", color: "#CBD5E1", fontWeight: 400, fontSize: 10, borderLeft: hi===0?"1px solid #F1F5F9":"none" }}>{h}</th>
+                        ))}</>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...tableRows].reverse().map((row, ri) => {
+                      const isLatest = ri === 0;
+                      return (
+                        <tr key={row.week} style={{ borderBottom: "1px solid #F8FAFC", background: isLatest ? "#F8FAFF" : "transparent" }}>
+                          <td style={{ padding: "9px 10px", fontWeight: isLatest ? 600 : 400, color: "#334155", whiteSpace: "nowrap" }}>
+                            {isLatest && <span style={{ background: "#0077B5", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, marginRight: 6 }}>Atual</span>}
+                            {row.label}
+                          </td>
+                          {[...profiles.map((p) => row.woW[p.name]), row.woW["__composite"]].map((d, di) => {
+                            const val = weeklyMetric === "imp" ? d?.imp : weeklyMetric === "eng" ? d?.eng : d?.fol;
+                            const chg = weeklyMetric === "imp" ? d?.imp_chg : weeklyMetric === "eng" ? d?.eng_chg : null;
+                            const isPos = chg > 0, isNeg = chg < 0;
+                            return (
+                              <>
+                                <td key={di+"v"} style={{ padding: "9px 10px", textAlign: "right", fontWeight: 600, color: "#0F172A", borderLeft: "1px solid #F1F5F9" }}>{fmtNum(val || 0)}</td>
+                                <td key={di+"c"} style={{ padding: "9px 10px", textAlign: "right", minWidth: 60 }}>
+                                  {chg !== null && chg !== undefined ? (
+                                    <span style={{ background: isPos ? "#F0FDF4" : isNeg ? "#FEF2F2" : "#F8FAFC", color: isPos ? "#16A34A" : isNeg ? "#DC2626" : "#94A3B8", padding: "2px 7px", borderRadius: 20, fontWeight: 600, fontSize: 11 }}>
+                                      {isPos ? "+" : ""}{chg}%
+                                    </span>
+                                  ) : <span style={{ color: "#CBD5E1", fontSize: 11 }}>—</span>}
+                                </td>
+                              </>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          );
+        })()}
       </div>
 
       {showUpload && <UploadModal client={client} existingProfiles={profiles} onClose={() => setShowUpload(false)} onDone={() => { setShowUpload(false); loadAll(); }} />}
