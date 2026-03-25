@@ -6,8 +6,9 @@ import {
 } from "recharts";
 
 // ── Supabase config from Vercel env vars ─────────────────────────────────────
-const SUPA_URL = import.meta.env.VITE_SUPABASE_URL || "";
-const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
+const SUPA_URL = (import.meta.env.VITE_SUPABASE_URL || "").trim().replace(/\/$/, "");
+const SUPA_KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY || "").trim();
+const ENV_OK = SUPA_URL.startsWith("https://") && SUPA_KEY.startsWith("eyJ");
 
 // ── Colors ───────────────────────────────────────────────────────────────────
 const COLORS = ["#0077B5", "#F59E0B", "#10B981", "#EF4444", "#8B5CF6"];
@@ -260,16 +261,29 @@ function LoginScreen({ onLogin }) {
   const [loading, setLoading] = useState(false);
 
   const login = async () => {
-    if (!SUPA_URL || !SUPA_KEY) { setErr("Variáveis de ambiente não configuradas. Verifique o Vercel."); return; }
+    if (!ENV_OK) {
+      setErr(`Configuração incompleta. URL: "${SUPA_URL.slice(0,30)||"vazia"}" — verifique as env vars no Vercel e faça Redeploy sem cache.`);
+      return;
+    }
     setLoading(true); setErr("");
-    const client = buildClient(null);
-    const data = await client.auth.signIn(email, pass);
-    setLoading(false);
-    if (data.access_token) {
-      localStorage.setItem("hart_session", JSON.stringify(data));
-      onLogin(data);
-    } else {
-      setErr(data.error_description || data.msg || "Credenciais inválidas.");
+    try {
+      const res = await fetch(`${SUPA_URL}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: { "apikey": SUPA_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password: pass }),
+      });
+      const data = await res.json();
+      setLoading(false);
+      if (data.access_token) {
+        localStorage.setItem("hart_session", JSON.stringify(data));
+        onLogin(data);
+      } else {
+        const msg = data.error_description || data.error || data.msg || JSON.stringify(data);
+        setErr("Erro: " + msg);
+      }
+    } catch (e) {
+      setLoading(false);
+      setErr("Erro de conexão: " + e.message);
     }
   };
 
@@ -289,6 +303,17 @@ function LoginScreen({ onLogin }) {
         </div>
         {err && <div style={{ background: "#FEF2F2", color: "#DC2626", borderRadius: 8, padding: "10px 14px", fontSize: 12, marginBottom: 12 }}>{err}</div>}
         <Btn full onClick={login} disabled={!email || !pass || loading}>{loading ? "Entrando..." : "Entrar →"}</Btn>
+        <div style={{ marginTop: 16, textAlign: "center", fontSize: 10, color: ENV_OK ? "#10B981" : "#F59E0B" }}>
+          {ENV_OK ? "✓ Supabase configurado" : "⚠ Env vars não detectadas — veja instruções abaixo"}
+        </div>
+        {!ENV_OK && (
+          <div style={{ marginTop: 10, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 14px", fontSize: 11, color: "#92400E", lineHeight: 1.6 }}>
+            <strong>Para corrigir:</strong><br/>
+            1. Vercel → Settings → Environment Variables<br/>
+            2. Confirme <code>VITE_SUPABASE_URL</code> e <code>VITE_SUPABASE_ANON_KEY</code><br/>
+            3. Deployments → ··· → Redeploy → <strong>desmarque "Use existing build cache"</strong>
+          </div>
+        )}
       </div>
     </div>
   );
